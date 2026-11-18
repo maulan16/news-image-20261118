@@ -2,7 +2,7 @@
 
 [![make.fun · news-image-20261118](https://make.fun/badge/news-image-20261118.svg)](https://make.fun/bounty/news-image-20261118)
 
-A one-page newspaper summing up the world's news of Wednesday 18 November 2026 — drawn entirely in code, Python standard library only. Text is a smooth single-stroke vector font and the whole page is rendered at 3x and downsampled, so edges are anti-aliased instead of blocky. Panels, frames and illustration regions are large-radius rounded rectangles with soft drop shadows and gradients — nothing flat and square.
+A one-page newspaper summing up the world's news of Wednesday 18 November 2026 — drawn entirely in code, Python standard library only. Text is a smooth single-stroke vector font and the whole page is rendered at 3x and downsampled, so edges are anti-aliased instead of blocky. Panels, frames and illustration regions are large-radius rounded rectangles with soft drop shadows and gradients — nothing flat and square. The four illustrations are printed like newspaper photos: grayscale halftone dots (a regular 7 px dot grid; dot size follows the darkness underneath), so the pictures read as black-and-white press photos, not colour cartoons — and the four subjects are sized to a similar visual weight.
 
 ## The four stories
 
@@ -17,7 +17,7 @@ A one-page newspaper summing up the world's news of Wednesday 18 November 2026 �
 MAKEFUN_OUTPUT_DIR=out python3 -P -s main.py
 ```
 
-This writes `out/entry.png` (1024x1024, ~117 KB). The program is fully deterministic: no clock, no network, no random — run it twice and the bytes are identical.
+This writes `out/entry.png` (1024x1024, ~99 KB). The program is fully deterministic: no clock, no network, no random — run it twice and the bytes are identical.
 
 ---
 

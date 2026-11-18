@@ -19,8 +19,11 @@ Rendering is supersampled 3x (3072x3072) and box-downsampled to
 1024x1024, so text and shapes get smooth anti-aliased edges instead of
 the blocky pixel look. Panels, frames and illustration regions are
 large-radius rounded rectangles with soft shadows and gradients --
-nothing flat and square. The harness is standard-library only, so no
-Pillow or external fonts are used.
+nothing flat and square. The four illustrations are printed like
+newspaper photos: grayscale halftone dots (a regular deterministic dot
+grid; dot size follows the darkness underneath), so the pictures read
+as black-and-white press photos, not colour cartoons. Text stays crisp
+-- the halftone pass touches only the illustration regions.
 Run:  MAKEFUN_OUTPUT_DIR=out python3 -P -s main.py
 """
 import math
@@ -264,6 +267,56 @@ def round_frame(x0, y0, x1, y1, r, c, w=3):
     arc(x0 + r, y1 - r, ar, 0.5 * math.pi, math.pi, c, w)
 
 
+# ---------------------------------------------------------------- halftone
+# Newspaper-photo pass: turn a rendered illustration into grayscale
+# halftone dots. A regular square dot grid (fixed 7 logical px cells,
+# no random) is laid over the region; each cell's dot radius follows
+# the darkness sampled underneath it (dot area ~ darkness, so dark
+# areas print as big merged dots and light areas as tiny specks).
+# Call while the region's rounded clip is still set: the erase and the
+# dots both stay inside the rounded illustration region.
+HT_CELL = 7
+
+
+def _lum_at(sx, sy):
+    """Luminance (0..255) of one supersampled pixel."""
+    i = (sy * SW + sx) * 3
+    return (299 * pix[i] + 587 * pix[i + 1] + 114 * pix[i + 2]) // 1000
+
+
+def halftone(x, y, w, h):
+    x0s, y0s = int(x * SS), int(y * SS)
+    x1s, y1s = int((x + w) * SS), int((y + h) * SS)
+    cell = HT_CELL * SS
+    nx = (x1s - x0s + cell - 1) // cell
+    ny = (y1s - y0s + cell - 1) // cell
+    # sample average luminance per cell first (before erasing)
+    vals = []
+    for cy in range(ny):
+        row = []
+        for cx in range(nx):
+            sx0, sy0 = x0s + cx * cell, y0s + cy * cell
+            sx1, sy1 = min(sx0 + cell, x1s), min(sy0 + cell, y1s)
+            tot = n = 0
+            for sy in range(sy0, sy1, 3):
+                for sx in range(sx0, sx1, 3):
+                    tot += _lum_at(sx, sy)
+                    n += 1
+            row.append(tot // max(n, 1))
+        vals.append(row)
+    # erase the region to white (clip keeps the rounded corners)
+    fill_rect(x, y, x + w, y + h, WHITE)
+    # print the dots: black ink, radius from darkness
+    for cy, row in enumerate(vals):
+        for cx, lum in enumerate(row):
+            d = 1.0 - lum / 255.0
+            if d <= 0.02:
+                continue
+            r = HT_CELL * 0.56 * math.sqrt(d)
+            fill_circle(x + (cx + 0.5) * HT_CELL,
+                        y + (cy + 0.5) * HT_CELL, r, INK)
+
+
 # ---------------------------------------------------------------- stroke font
 # Single-stroke vector font on a 10x12 grid (x 0..10, y 0..12, y=0 top).
 # Each glyph is a list of strokes; a stroke is a list of (x, y) points.
@@ -485,15 +538,17 @@ def draw_summit(x, y, w, h):
 
 
 def draw_bridge(x, y, w, h):
-    """Crimea bridge under fire: deck, towers, explosion, smoke."""
-    vgrad(x, y, x + w, y + h, (94, 104, 122), (52, 60, 78))
+    """Crimea bridge under fire: deck, towers, explosion, smoke.
+    The sky and water are kept light enough that the dark deck, towers
+    and the bright explosion still separate once printed in halftone."""
+    vgrad(x, y, x + w, y + h, (150, 160, 175), (110, 120, 135))
     # smoke clouds
     fill_circle(x + 90, y + 26, 17, (104, 110, 122))
     fill_circle(x + 150, y + 18, 13, (112, 118, 130))
     fill_circle(x + 350, y + 30, 15, (104, 110, 122))
     # water (deep gradient, not a flat slab)
     wy = y + h - 52
-    vgrad(x, wy, x + w, y + h, (28, 60, 100), (18, 40, 72))
+    vgrad(x, wy, x + w, y + h, (60, 95, 135), (40, 70, 105))
     for i in range(6):
         line(x + 20 + i * 74, wy + 12 + (i % 2) * 14,
              x + 66 + i * 74, wy + 12 + (i % 2) * 14, (120, 170, 210), 2)
@@ -512,14 +567,14 @@ def draw_bridge(x, y, w, h):
     outer = []
     for i in range(16):
         a = math.radians(i * 22.5)
-        r = 36 if i % 2 == 0 else 19
+        r = 40 if i % 2 == 0 else 21
         outer.append((int(ex + r * math.cos(a)),
                       int(ey + r * math.sin(a) * 0.85)))
     poly(outer, (255, 140, 30))
     inner = []
     for i in range(12):
         a = math.radians(i * 30 + 15)
-        r = 21 if i % 2 == 0 else 11
+        r = 23 if i % 2 == 0 else 12
         inner.append((int(ex + r * math.cos(a)),
                       int(ey + r * math.sin(a) * 0.85)))
     poly(inner, (255, 205, 60))
@@ -534,8 +589,10 @@ def draw_bridge(x, y, w, h):
 
 
 def draw_drones(x, y, w, h):
-    """Night over the Gulf: radar dish, drones, radar screen."""
-    vgrad(x, y, x + w, y + h, (10, 22, 52), (26, 54, 104))
+    """Night over the Gulf: radar dish, drones, radar screen.
+    The sky is a light dusk grey (not near-black) so the dark drone
+    silhouettes still read once the scene is printed in halftone."""
+    vgrad(x, y, x + w, y + h, (110, 130, 160), (150, 165, 190))
     # stars
     for sx, sy in ((30, 22), (90, 40), (150, 16), (210, 34), (280, 20),
                    (330, 44), (390, 26), (60, 62), (250, 58), (180, 52),
@@ -543,7 +600,7 @@ def draw_drones(x, y, w, h):
         fill_circle(x + sx, y + sy, 2, WHITE)
     # sea (gradient, not a flat slab)
     sy = y + h - 44
-    vgrad(x, sy, x + w, y + h, (10, 48, 76), (6, 30, 52))
+    vgrad(x, sy, x + w, y + h, (60, 100, 135), (40, 70, 105))
     line(x + 16, sy + 12, x + 120, sy + 12, (70, 130, 170), 2)
     line(x + 220, sy + 26, x + 330, sy + 26, (70, 130, 170), 2)
     # land strip + radar pedestal (rounded top edge)
@@ -560,8 +617,8 @@ def draw_drones(x, y, w, h):
     line(bx, by - 48, bx + 88, by - 108, (90, 255, 140), 3)
     add_circle(bx + 88, by - 108, 16, (90, 255, 140), 0.6)
     # drones (dark silhouettes with rotor blur + red light)
-    for dx, dy, sc in ((x + 250, y + 52, 1.0), (x + 320, y + 92, 0.85),
-                       (x + 200, y + 110, 0.7)):
+    for dx, dy, sc in ((x + 250, y + 52, 1.15), (x + 320, y + 92, 1.0),
+                       (x + 200, y + 110, 0.85)):
         s = int(16 * sc)
         fill_rect(dx - s, dy - 4, dx + s, dy + 4, (12, 12, 14))
         fill_rect(dx - 4, dy - s // 2, dx + 4, dy + s // 2, (12, 12, 14))
@@ -594,34 +651,35 @@ def draw_cyclone(x, y, w, h):
     for i in range(5):
         arc(x + 40 + i * 84, sy + 14 + (i % 2) * 12, 18, math.pi, 2 * math.pi,
             (200, 225, 245), 2)
-    # cyclone spiral (banded)
+    # cyclone spiral (banded) -- kept to a moderate size so it does not
+    # dwarf the other panels' subjects
     cx, cy = x + w // 2 - 30, y + h // 2 - 6
     cols = [WHITE, (205, 232, 245), WHITE, (180, 215, 238)]
     steps = 220
     prev = None
     for i in range(steps + 1):
         a = (i / steps) * 4.6 * math.pi
-        r = 8 + (96 - 8) * (i / steps)
+        r = 8 + (72 - 8) * (i / steps)
         px = int(cx + r * math.cos(a))
         py = int(cy + r * math.sin(a) * 0.82)
         if prev:
-            line(prev[0], prev[1], px, py, cols[(i // 14) % 4], 11)
+            line(prev[0], prev[1], px, py, cols[(i // 14) % 4], 9)
         prev = (px, py)
-    fill_circle(cx, cy, 13, (30, 48, 78))
-    fill_circle(cx, cy, 13, (30, 48, 78))
-    arc(cx, cy, 16, 0, 2 * math.pi, WHITE, 3)
+    fill_circle(cx, cy, 12, (30, 48, 78))
+    fill_circle(cx, cy, 12, (30, 48, 78))
+    arc(cx, cy, 15, 0, 2 * math.pi, WHITE, 3)
     # coastline (India east coast, bottom-right)
     poly([(x + w - 150, y + h), (x + w - 118, sy + 6), (x + w - 84, sy + 18),
           (x + w - 52, sy + 10), (x + w - 20, sy + 22), (x + w, sy + 16),
           (x + w, y + h)], (196, 178, 130))
-    # warning triangles on the coast
+    # warning triangles on the coast (sized up so they survive halftone)
     for tx in (x + w - 128, x + w - 88, x + w - 48):
-        poly([(tx, sy + 2), (tx + 9, sy + 18), (tx - 9, sy + 18)],
+        poly([(tx, sy), (tx + 11, sy + 22), (tx - 11, sy + 22)],
              (200, 30, 30))
         draw_text(tx - 2, sy + 8, 1, WHITE, '!')
-    # HIGH ALERT pill (rounded, inset -- no flat full-width strip)
-    round_rect(x + 18, y + h - 24, x + w - 18, y + h - 2, 11, (179, 32, 44))
-    center_text(x + w // 2, y + h - 19, 2, WHITE, 'HIGH ALERT')
+    # NOTE: the HIGH ALERT pill is drawn in draw_panel AFTER the halftone
+    # pass, so it stays a crisp black pill with crisp white text instead
+    # of being dissolved into dots.
 
 
 # ---------------------------------------------------------------- layout
@@ -654,7 +712,15 @@ def draw_panel(px, py, story):
     ix, iy, iw, ih = px + 16, py + 38, 448, 210
     set_clip(ix, iy, ix + iw, iy + ih, 14)
     draw(ix, iy, iw, ih)
+    # newspaper-photo pass: the illustration becomes grayscale halftone
+    halftone(ix, iy, iw, ih)
     clear_clip()
+    # crisp black HIGH ALERT pill for the cyclone story (drawn after the
+    # halftone pass so it is not dissolved into dots)
+    if draw is draw_cyclone:
+        round_rect(ix + 18, iy + ih - 24, ix + iw - 18, iy + ih - 2, 11,
+                   (28, 28, 28))
+        center_text(ix + iw // 2, iy + ih - 19, 2, WHITE, 'HIGH ALERT')
     round_frame(ix, iy, ix + iw, iy + ih, 14, (190, 190, 190), 2)
     round_rect(px + 16, py + 255, px + pw - 16, py + 259, 2,
                (200, 200, 200))
