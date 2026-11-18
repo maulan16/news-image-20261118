@@ -15,6 +15,10 @@ Stories (all reported on 18 Nov 2026):
 
 Deterministic: no clock, no network, no random. The same bytes are
 written on every run.
+Rendering is supersampled 3x (3072x3072) and box-downsampled to
+1024x1024, so text and shapes get smooth anti-aliased edges instead of
+the blocky pixel look. The harness is standard-library only, so no
+Pillow or external fonts are used.
 Run:  MAKEFUN_OUTPUT_DIR=out python3 -P -s main.py
 """
 import math
@@ -22,8 +26,12 @@ import os
 import struct
 import zlib
 
+# Supersampling: render at 3x, then box-downsample to 1024 for smooth
+# anti-aliased edges.
+SS = 3
 W = H = 1024
-pix = bytearray(W * H * 3)
+SW = SH = W * SS
+pix = bytearray(SW * SH * 3)
 
 # ---------------------------------------------------------------- palette
 PAPER = (247, 243, 232)
@@ -39,59 +47,66 @@ def _clamp(v):
     return 255 if v > 255 else (0 if v < 0 else v)
 
 
+def _blit_rect(x0, y0, x1, y1, c):
+    """Fill a rect in supersampled coordinates (direct pixel writes)."""
+    x0 = max(0, int(x0)); y0 = max(0, int(y0))
+    x1 = min(SW, int(x1)); y1 = min(SH, int(y1))
+    if x1 <= x0 or y1 <= y0:
+        return
+    row = bytes(c) * (x1 - x0)
+    for y in range(y0, y1):
+        base = (y * SW + x0) * 3
+        pix[base:base + len(row)] = row
+
+
 def set_px(x, y, c):
-    if 0 <= x < W and 0 <= y < H:
-        i = (y * W + x) * 3
-        pix[i], pix[i + 1], pix[i + 2] = c
+    _blit_rect(int(x * SS), int(y * SS),
+              int((x + 1) * SS), int((y + 1) * SS), c)
 
 
 def fill_rect(x0, y0, x1, y1, c):
-    x0 = max(0, int(x0)); y0 = max(0, int(y0))
-    x1 = min(W, int(x1)); y1 = min(H, int(y1))
-    if x1 <= x0 or y1 <= y0:
-        return
-    r, g, b = c
-    for y in range(y0, y1):
-        base = y * W * 3
-        for x in range(x0, x1):
-            i = base + x * 3
-            pix[i] = r; pix[i + 1] = g; pix[i + 2] = b
+    """Fill a rect in logical (1024) coordinates; scaled to SS inside."""
+    _blit_rect(int(x0 * SS), int(y0 * SS),
+              int(x1 * SS), int(y1 * SS), c)
 
 
 def vgrad(x0, y0, x1, y1, c0, c1):
-    """Vertical gradient fill of a rect."""
-    h = max(1, y1 - y0)
-    for y in range(y0, y1):
-        t = (y - y0) / h
+    """Vertical gradient fill of a rect (smooth: one step per subpixel row)."""
+    y0s, y1s = int(y0 * SS), int(y1 * SS)
+    x0s, x1s = int(x0 * SS), int(x1 * SS)
+    h = max(1, y1s - y0s)
+    for sy in range(max(0, y0s), min(SH, y1s)):
+        t = (sy - y0s) / h
         c = tuple(int(c0[k] + (c1[k] - c0[k]) * t) for k in range(3))
-        fill_rect(x0, y, x1, y + 1, c)
+        _blit_rect(x0s, sy, x1s, sy + 1, c)
 
 
 def fill_circle(cx, cy, r, c):
-    r = int(r)
+    """Filled circle; edge computed at supersampled resolution."""
+    cx, cy, r = int(cx * SS), int(cy * SS), int(r * SS)
     if r <= 0:
         return
     for dy in range(-r, r + 1):
         dx = int((r * r - dy * dy) ** 0.5)
-        fill_rect(cx - dx, cy + dy, cx + dx + 1, cy + dy + 1, c)
+        _blit_rect(cx - dx, cy + dy, cx + dx + 1, cy + dy + 1, c)
 
 
 def add_circle(cx, cy, r, c, strength=1.0):
-    """Additive soft glow disk."""
-    r = int(r)
+    """Additive soft glow disk (computed at supersampled resolution)."""
+    cx, cy, r = int(cx * SS), int(cy * SS), int(r * SS)
     if r <= 0:
         return
     r2 = r * r
     for dy in range(-r, r + 1):
         yy = cy + dy
-        if yy < 0 or yy >= H:
+        if yy < 0 or yy >= SH:
             continue
         dx = int((r2 - dy * dy) ** 0.5)
         for x in range(cx - dx, cx + dx + 1):
-            if 0 <= x < W:
+            if 0 <= x < SW:
                 d2 = (x - cx) ** 2 + dy * dy
                 f = (1.0 - d2 / r2) ** 2 * strength
-                i = (yy * W + x) * 3
+                i = (yy * SW + x) * 3
                 pix[i] = _clamp(pix[i] + int(c[0] * f))
                 pix[i + 1] = _clamp(pix[i + 1] + int(c[1] * f))
                 pix[i + 2] = _clamp(pix[i + 2] + int(c[2] * f))
@@ -99,31 +114,32 @@ def add_circle(cx, cy, r, c, strength=1.0):
 
 def line(x0, y0, x1, y1, c, w=1):
     dx, dy = x1 - x0, y1 - y0
-    steps = max(abs(dx), abs(dy), 1)
+    steps = max(int(abs(dx)), int(abs(dy)), 1)
     rad = max(1, w // 2)
     for i in range(steps + 1):
         t = i / steps
-        fill_circle(int(x0 + dx * t), int(y0 + dy * t), rad, c)
+        fill_circle(x0 + dx * t, y0 + dy * t, rad, c)
 
 
 def poly(pts, c):
-    """Scanline polygon fill (even-odd)."""
+    """Scanline polygon fill (even-odd); edges computed at SS resolution."""
     if len(pts) < 3:
         return
-    ys = range(max(0, min(p[1] for p in pts)),
-               min(H, max(p[1] for p in pts) + 1))
-    n = len(pts)
+    spts = [(p[0] * SS, p[1] * SS) for p in pts]
+    ys = range(max(0, int(min(p[1] for p in spts))),
+               min(SH, int(max(p[1] for p in spts)) + 1))
+    n = len(spts)
     for y in ys:
         xs = []
         for i in range(n):
-            x0, y0 = pts[i]
-            x1, y1 = pts[(i + 1) % n]
+            x0, y0 = spts[i]
+            x1, y1 = spts[(i + 1) % n]
             if (y0 <= y < y1) or (y1 <= y < y0):
                 if y1 != y0:
                     xs.append(x0 + (y - y0) * (x1 - x0) / (y1 - y0))
         xs.sort()
         for k in range(0, len(xs) - 1, 2):
-            fill_rect(int(xs[k]), y, int(xs[k + 1]) + 1, y + 1, c)
+            _blit_rect(int(xs[k]), y, int(xs[k + 1]) + 1, y + 1, c)
 
 
 def arc(cx, cy, r, a0, a1, c, w=2):
@@ -131,7 +147,7 @@ def arc(cx, cy, r, a0, a1, c, w=2):
     prev = None
     for i in range(steps + 1):
         a = a0 + (a1 - a0) * i / steps
-        p = (int(cx + r * math.cos(a)), int(cy + r * math.sin(a)))
+        p = (cx + r * math.cos(a), cy + r * math.sin(a))
         if prev:
             line(prev[0], prev[1], p[0], p[1], c, w)
         prev = p
@@ -144,83 +160,137 @@ def frame(x0, y0, x1, y1, c, w=3):
     fill_rect(x1 - w, y0, x1, y1, c)
 
 
-# ---------------------------------------------------------------- 5x7 font
-# Each glyph: 7 rows, each a 5-bit int (bit 4 = leftmost column).
-FONT = {
-    'A': [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-    'B': [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
-    'C': [0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E],
-    'D': [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E],
-    'E': [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
-    'F': [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
-    'G': [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
-    'H': [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
-    'I': [0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E],
-    'J': [0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C],
-    'K': [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
-    'L': [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
-    'M': [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
-    'N': [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
-    'O': [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-    'P': [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
-    'Q': [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
-    'R': [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
-    'S': [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
-    'T': [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
-    'U': [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
-    'V': [0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04],
-    'W': [0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11],
-    'X': [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
-    'Y': [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
-    'Z': [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
-    '0': [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
-    '1': [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
-    '2': [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
-    '3': [0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E],
-    '4': [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
-    '5': [0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E],
-    '6': [0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E],
-    '7': [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
-    '8': [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
-    '9': [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E],
-    ' ': [0, 0, 0, 0, 0, 0, 0],
-    '.': [0, 0, 0, 0, 0, 0x0C, 0x0C],
-    ',': [0, 0, 0, 0, 0x0C, 0x04, 0x08],
-    ':': [0, 0x0C, 0x0C, 0, 0x0C, 0x0C, 0],
-    ';': [0, 0x0C, 0x0C, 0, 0x0C, 0x04, 0x08],
-    '!': [0x04, 0x04, 0x04, 0x04, 0x04, 0, 0x04],
-    '?': [0x0E, 0x11, 0x01, 0x02, 0x04, 0, 0x04],
-    '-': [0, 0, 0, 0x0E, 0, 0, 0],
-    "'": [0x04, 0x04, 0x08, 0, 0, 0, 0],
-    '(': [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
-    ')': [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
-    '/': [0x01, 0x02, 0x02, 0x04, 0x08, 0x08, 0x10],
-    '&': [0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D],
-    '+': [0, 0x04, 0x04, 0x0E, 0x04, 0x04, 0],
-    '%': [0x19, 0x1A, 0x02, 0x04, 0x08, 0x0B, 0x13],
-    '=': [0, 0, 0x1F, 0, 0x1F, 0, 0],
-    '_': [0, 0, 0, 0, 0, 0, 0x1F],
-    '"': [0x0A, 0x0A, 0, 0, 0, 0, 0],
-    '*': [0, 0x15, 0x0E, 0x15, 0, 0, 0],
+# ---------------------------------------------------------------- stroke font
+# Single-stroke vector font on a 10x12 grid (x 0..10, y 0..12, y=0 top).
+# Each glyph is a list of strokes; a stroke is a list of (x, y) points.
+# A one-point stroke is a dot. Strokes are drawn with the anti-aliased
+# line primitive, so letterforms are smooth curves and diagonals instead
+# of the blocky 5x7 bitmap rectangles. Cap height is 12 grid units.
+def _arc(cx, cy, rx, ry, a0, a1, n=10):
+    """Points along an ellipse arc. Angles in degrees, y-down
+    (0=east, 90=south, 180=west, 270=north); goes from a0 to a1."""
+    pts = []
+    for i in range(n + 1):
+        a = math.radians(a0 + (a1 - a0) * i / n)
+        pts.append((round(cx + rx * math.cos(a), 2),
+                    round(cy + ry * math.sin(a), 2)))
+    return pts
+
+
+STROKES = {
+    'A': [[(1, 12), (5, 0), (9, 12)], [(3, 8), (7, 8)]],
+    'B': [[(1, 0), (1, 12)],
+          [(1, 0), (6, 0)] + _arc(6, 3, 2.5, 3, -90, 90, 8) + [(6, 6), (1, 6)],
+          [(1, 6), (6, 6)] + _arc(6, 9, 2.5, 3, -90, 90, 8) + [(6, 12), (1, 12)]],
+    'C': [_arc(5, 6, 4.5, 6, 50, 310, 14)],
+    'D': [[(1, 0), (1, 12)],
+          [(1, 0), (6, 0)] + _arc(6, 6, 3, 6, -90, 90, 10) + [(6, 12), (1, 12)]],
+    'E': [[(1, 0), (1, 12)], [(1, 0), (9, 0)], [(1, 6), (7, 6)], [(1, 12), (9, 12)]],
+    'F': [[(1, 0), (1, 12)], [(1, 0), (9, 0)], [(1, 6), (7, 6)]],
+    'G': [_arc(5, 6, 4.5, 6, 50, 310, 14), [(9, 6), (5, 6), (5, 10)]],
+    'H': [[(1, 0), (1, 12)], [(9, 0), (9, 12)], [(1, 6), (9, 6)]],
+    'I': [[(2, 0), (8, 0)], [(5, 0), (5, 12)], [(2, 12), (8, 12)]],
+    'J': [[(8, 0), (8, 10)] + _arc(5, 10, 3, 2, 0, 180, 8) + [(2, 8)]],
+    'K': [[(1, 0), (1, 12)], [(9, 0), (1, 6)], [(3.5, 7.5), (9, 12)]],
+    'L': [[(1, 0), (1, 12)], [(1, 12), (9, 12)]],
+    'M': [[(1, 12), (1, 0), (5, 8), (9, 0), (9, 12)]],
+    'N': [[(1, 12), (1, 0), (9, 12), (9, 0)]],
+    'O': [_arc(5, 6, 4.5, 6, 0, 360, 16)],
+    'P': [[(1, 0), (1, 12)],
+          [(1, 0), (6, 0)] + _arc(6, 3, 2.5, 3, -90, 90, 8) + [(6, 6), (1, 6)]],
+    'Q': [_arc(5, 6, 4.5, 6, 0, 360, 16), [(7, 9), (10, 12)]],
+    'R': [[(1, 0), (1, 12)],
+          [(1, 0), (6, 0)] + _arc(6, 3, 2.5, 3, -90, 90, 8) + [(6, 6), (1, 6)],
+          [(4.5, 6), (9, 12)]],
+    'S': [_arc(5, 3, 4, 3, 330, 90, 12), _arc(5, 9, 4, 3, 270, 585, 12)],
+    'T': [[(1, 0), (9, 0)], [(5, 0), (5, 12)]],
+    'U': [[(1, 0), (1, 8)] + _arc(5, 8, 4, 4, 180, 0, 10) + [(9, 8), (9, 0)]],
+    'V': [[(1, 0), (5, 12), (9, 0)]],
+    'W': [[(1, 0), (2.5, 12), (5, 4), (7.5, 12), (9, 0)]],
+    'X': [[(1, 0), (9, 12)], [(9, 0), (1, 12)]],
+    'Y': [[(1, 0), (5, 6), (9, 0)], [(5, 6), (5, 12)]],
+    'Z': [[(1, 0), (9, 0), (1, 12), (9, 12)]],
+    '0': [_arc(5, 6, 3.5, 6, 0, 360, 14), [(3, 3), (7, 9)]],
+    '1': [[(3, 3), (6, 0)], [(5, 0), (5, 12)], [(2, 12), (8, 12)]],
+    '2': [_arc(5, 4, 3.5, 4, 180, 360, 10), [(8.5, 4), (1, 12)], [(1, 12), (9, 12)]],
+    '3': [[(2, 0), (6, 0), (8, 2), (8, 4), (5, 6)],
+          [(5, 6), (8, 6), (8, 10), (6, 12), (2, 12)]],
+    '4': [[(8, 0), (1, 8)], [(1, 8), (9, 8)], [(7, 0), (7, 12)]],
+    '5': [[(9, 0), (1, 0), (1, 6)],
+          [(1, 6), (6, 6), (8, 7), (8, 10), (6, 12), (2, 12)]],
+    '6': [[(8, 0), (5, 1), (3, 4), (3, 6)], _arc(5, 8, 3.5, 4, 0, 360, 14)],
+    '7': [[(1, 0), (9, 0)], [(9, 0), (3, 12)]],
+    '8': [_arc(5, 3.5, 3, 3.5, 0, 360, 12), _arc(5, 8.5, 3.5, 3.5, 0, 360, 12)],
+    '9': [_arc(5, 4, 3.5, 4, 0, 360, 14), [(8, 4), (8, 12)]],
+    ' ': [],
+    '.': [[(5, 11)]],
+    ',': [[(5, 10), (4.5, 12), (3.5, 14)]],
+    ':': [[(5, 4)], [(5, 10)]],
+    ';': [[(5, 4)], [(5, 9), (4.5, 11), (3.5, 13)]],
+    '!': [[(5, 0), (5, 8)], [(5, 11)]],
+    '?': [_arc(5, 3.5, 3.5, 3.5, 222, 402, 10),
+          [(7.7, 5.8), (5, 7), (5, 8.5)], [(5, 11)]],
+    '-': [[(1, 6), (9, 6)]],
+    "'": [[(6, 0), (5, 3)]],
+    '(': [[(7, 0), (5, 2), (4, 6), (5, 10), (7, 12)]],
+    ')': [[(3, 0), (5, 2), (6, 6), (5, 10), (3, 12)]],
+    '/': [[(8, 0), (2, 12)]],
+    '&': [[(8, 1), (5, 0), (2, 2), (2, 5), (5, 7)],
+          [(5, 7), (8, 5), (8, 8), (5, 11), (2, 10)]],
+    '+': [[(5, 2), (5, 10)], [(1, 6), (9, 6)]],
+    '%': [[(8, 0), (2, 12)], [(3, 3)], [(7, 9)]],
+    '=': [[(1, 4), (9, 4)], [(1, 8), (9, 8)]],
+    '_': [[(1, 12), (9, 12)]],
+    '"': [[(3, 0), (3, 3)], [(7, 0), (7, 3)]],
+    '*': [[(5, 1), (5, 11)], [(1, 4), (9, 8)], [(9, 4), (1, 8)]],
 }
+
+TRACK = 2.0  # tracking between glyphs, in grid units
+
+
+def _glyph_w(ch):
+    if ch == ' ':
+        return 4.0
+    g = STROKES.get(ch)
+    if not g:
+        return 4.0
+    return max((p[0] for st in g for p in st), default=0.0)
 
 
 def text_w(s, txt):
-    return len(txt) * 6 * s - s
+    """Pixel width of txt at scale s (cap height 7*s)."""
+    sc = (7 * s) / 12.0
+    tot = 0.0
+    for ch in txt.upper():
+        tot += (_glyph_w(ch) + TRACK) * sc
+    if tot > 0:
+        tot -= TRACK * sc
+    return int(round(tot))
 
 
 def draw_text(x, y, s, c, txt):
+    """Draw txt with cap top at y, cap height 7*s. Returns end x."""
     txt = txt.upper()
-    cx = x
+    em = 7 * s
+    sc = em / 12.0
+    sw = max(1, int(round(em * 0.15)))
+    cx = float(x)
     for ch in txt:
-        g = FONT.get(ch, FONT[' '])
-        for row in range(7):
-            bits = g[row]
-            for col in range(5):
-                if bits & (1 << (4 - col)):
-                    fill_rect(cx + col * s, y + row * s,
-                              cx + (col + 1) * s, y + (row + 1) * s, c)
-        cx += 6 * s
+        g = STROKES.get(ch)
+        if g:
+            for st in g:
+                if len(st) == 1:
+                    px, py = st[0]
+                    fill_circle(cx + px * sc, y + py * sc,
+                                max(sw * 0.6, 1.0), c)
+                else:
+                    prev = None
+                    for (gx, gy) in st:
+                        p = (cx + gx * sc, y + gy * sc)
+                        if prev is not None:
+                            line(prev[0], prev[1], p[0], p[1], c, sw)
+                        prev = p
+        cx += (_glyph_w(ch) + TRACK) * sc
     return cx
 
 
@@ -242,7 +312,6 @@ def wrap(txt, max_chars):
     if cur:
         lines.append(cur)
     return lines
-
 
 # ---------------------------------------------------------------- illustrations
 def draw_summit(x, y, w, h):
@@ -490,11 +559,30 @@ def build():
 
 
 # ---------------------------------------------------------------- PNG encode
+def downsample():
+    """Box-filter the 3x buffer down to 1024x1024 (anti-aliasing)."""
+    out = bytearray(W * H * 3)
+    n = SS * SS
+    src = pix
+    for oy in range(H):
+        for ox in range(W):
+            r = g = b = 0
+            for dy in range(SS):
+                base = ((oy * SS + dy) * SW + ox * SS) * 3
+                for dx in range(SS):
+                    i = base + dx * 3
+                    r += src[i]; g += src[i + 1]; b += src[i + 2]
+            o = (oy * W + ox) * 3
+            out[o] = r // n; out[o + 1] = g // n; out[o + 2] = b // n
+    return bytes(out)
+
+
 def png_bytes():
+    data = downsample()
     raw = bytearray()
     prev = bytearray(W * 3)
     for y in range(H):
-        row = pix[y * W * 3:(y + 1) * W * 3]
+        row = data[y * W * 3:(y + 1) * W * 3]
         if y == 0:
             raw.append(0)
             raw += row
