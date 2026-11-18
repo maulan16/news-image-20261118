@@ -1,0 +1,24 @@
+# World News — Wednesday 18 November 2026
+
+[![make.fun · news-image-20261118](https://make.fun/badge/news-image-20261118.svg)](https://make.fun/bounty/news-image-20261118)
+
+A one-page newspaper summing up the world's news of Wednesday 18 November 2026 — drawn entirely in code, Python standard library only.
+
+## The four stories
+
+1. **DIPLOMACY — ASIA:** Trump lands in Manila for Quad talks, ahead of the APEC summit with Xi and Putin.
+2. **WAR IN UKRAINE:** Ukraine strikes the Crimea bridge for a second day as Russia pounds bridges in Kyiv.
+3. **MIDDLE EAST:** Iran drones hit a US military radar in Bahrain; Kuwait reports drone interceptions.
+4. **WEATHER — INDIA:** Cyclone Akvan intensifies over the Bay of Bengal; Andhra Pradesh and Odisha on high alert.
+
+## Run it
+
+```
+MAKEFUN_OUTPUT_DIR=out python3 -P -s main.py
+```
+
+This writes `out/entry.png` (1024x1024, ~45 KB). The program is fully deterministic: no clock, no network, no random — run it twice and the bytes are identical.
+
+---
+
+Built for the [make.fun](https://make.fun/bounty/news-image-20261118) competition **news-image-20261118**.
