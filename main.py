@@ -17,7 +17,9 @@ Deterministic: no clock, no network, no random. The same bytes are
 written on every run.
 Rendering is supersampled 3x (3072x3072) and box-downsampled to
 1024x1024, so text and shapes get smooth anti-aliased edges instead of
-the blocky pixel look. The harness is standard-library only, so no
+the blocky pixel look. Panels, frames and illustration regions are
+large-radius rounded rectangles with soft shadows and gradients --
+nothing flat and square. The harness is standard-library only, so no
 Pillow or external fonts are used.
 Run:  MAKEFUN_OUTPUT_DIR=out python3 -P -s main.py
 """
@@ -47,16 +49,77 @@ def _clamp(v):
     return 255 if v > 255 else (0 if v < 0 else v)
 
 
+# Optional rounded-rect clip (supersampled coords): when set, _blit_rect
+# and add_circle only paint inside it. Used for illustration regions and
+# flags so their corners come out rounded instead of square.
+CLIP = None
+
+
+def set_clip(x0, y0, x1, y1, r):
+    global CLIP
+    CLIP = (int(x0 * SS), int(y0 * SS), int(x1 * SS), int(y1 * SS), r * SS)
+
+
+def clear_clip():
+    global CLIP
+    CLIP = None
+
+
+def push_clip(x0, y0, x1, y1, r):
+    """Set a clip and return the previous one (for nested clips)."""
+    prev = CLIP
+    set_clip(x0, y0, x1, y1, r)
+    return prev
+
+
+def pop_clip(prev):
+    global CLIP
+    CLIP = prev
+
+
+def _clip_row(sy):
+    """Allowed supersampled x-interval for row sy under CLIP, or None
+    when no clip is set. Returns an empty interval for rows outside."""
+    if CLIP is None:
+        return None
+    X0, Y0, X1, Y1, R = CLIP
+    if sy < Y0 or sy >= Y1:
+        return (0, 0)
+    cx0, cx1 = X0 + R, X1 - R
+    cy0, cy1 = Y0 + R, Y1 - R
+    if sy < cy0:
+        dy = cy0 - sy
+        dx = int((max(R * R - dy * dy, 0)) ** 0.5)
+        return (cx0 - dx, cx1 + dx)
+    if sy > cy1:
+        dy = sy - cy1
+        dx = int((max(R * R - dy * dy, 0)) ** 0.5)
+        return (cx0 - dx, cx1 + dx)
+    return (X0, X1)
+
+
 def _blit_rect(x0, y0, x1, y1, c):
     """Fill a rect in supersampled coordinates (direct pixel writes)."""
     x0 = max(0, int(x0)); y0 = max(0, int(y0))
     x1 = min(SW, int(x1)); y1 = min(SH, int(y1))
     if x1 <= x0 or y1 <= y0:
         return
-    row = bytes(c) * (x1 - x0)
-    for y in range(y0, y1):
-        base = (y * SW + x0) * 3
-        pix[base:base + len(row)] = row
+    if CLIP is None:
+        row = bytes(c) * (x1 - x0)
+        for y in range(y0, y1):
+            base = (y * SW + x0) * 3
+            pix[base:base + len(row)] = row
+    else:
+        for y in range(y0, y1):
+            cr = _clip_row(y)
+            if cr is None:
+                continue
+            lo, hi = max(cr[0], x0), min(cr[1], x1)
+            if hi <= lo:
+                continue
+            row = bytes(c) * (hi - lo)
+            base = (y * SW + lo) * 3
+            pix[base:base + len(row)] = row
 
 
 def set_px(x, y, c):
@@ -104,6 +167,10 @@ def add_circle(cx, cy, r, c, strength=1.0):
         dx = int((r2 - dy * dy) ** 0.5)
         for x in range(cx - dx, cx + dx + 1):
             if 0 <= x < SW:
+                if CLIP is not None:
+                    cr = _clip_row(yy)
+                    if cr is None or not (cr[0] <= x < cr[1]):
+                        continue
                 d2 = (x - cx) ** 2 + dy * dy
                 f = (1.0 - d2 / r2) ** 2 * strength
                 i = (yy * SW + x) * 3
@@ -158,6 +225,43 @@ def frame(x0, y0, x1, y1, c, w=3):
     fill_rect(x0, y1 - w, x1, y1, c)
     fill_rect(x0, y0, x0 + w, y1, c)
     fill_rect(x1 - w, y0, x1, y1, c)
+
+
+def round_rect(x0, y0, x1, y1, r, c):
+    """Filled rounded rect in logical coords (large radius = soft look)."""
+    r = max(0.0, min(float(r), (x1 - x0) / 2.0, (y1 - y0) / 2.0))
+    X0, Y0, X1, Y1 = int(x0 * SS), int(y0 * SS), int(x1 * SS), int(y1 * SS)
+    R = r * SS
+    cx0, cx1 = X0 + R, X1 - R
+    cy0, cy1 = Y0 + R, Y1 - R
+    for sy in range(max(0, Y0), min(SH, Y1)):
+        if sy < cy0:
+            dy = cy0 - sy
+            dx = int((max(R * R - dy * dy, 0)) ** 0.5)
+            lo, hi = cx0 - dx, cx1 + dx
+        elif sy > cy1:
+            dy = sy - cy1
+            dx = int((max(R * R - dy * dy, 0)) ** 0.5)
+            lo, hi = cx0 - dx, cx1 + dx
+        else:
+            lo, hi = X0, X1
+        _blit_rect(lo, sy, hi, sy + 1, c)
+
+
+def round_frame(x0, y0, x1, y1, r, c, w=3):
+    """Rounded outline: straight edges + quarter-circle corners.
+    Arc radius is r - w/2 so the stroke's outer edge lands exactly on
+    the rect boundary and joins the straight edges."""
+    r = max(0.0, min(float(r), (x1 - x0) / 2.0, (y1 - y0) / 2.0))
+    fill_rect(x0 + r, y0, x1 - r, y0 + w, c)
+    fill_rect(x0 + r, y1 - w, x1 - r, y1, c)
+    fill_rect(x0, y0 + r, x0 + w, y1 - r, c)
+    fill_rect(x1 - w, y0 + r, x1, y1 - r, c)
+    ar = r - w / 2.0
+    arc(x0 + r, y0 + r, ar, math.pi, 1.5 * math.pi, c, w)
+    arc(x1 - r, y0 + r, ar, 1.5 * math.pi, 2 * math.pi, c, w)
+    arc(x1 - r, y1 - r, ar, 0, 0.5 * math.pi, c, w)
+    arc(x0 + r, y1 - r, ar, 0.5 * math.pi, math.pi, c, w)
 
 
 # ---------------------------------------------------------------- stroke font
@@ -318,9 +422,17 @@ def draw_summit(x, y, w, h):
     """Four flags + plane: Trump lands in Manila for Quad talks."""
     vgrad(x, y, x + w, y + h, (168, 205, 232), (232, 242, 248))
     fill_circle(x + w - 52, y + 34, 22, (255, 214, 90))
-    # ground
-    fill_rect(x, y + h - 26, x + w, y + h, (74, 140, 78))
-    fill_rect(x, y + h - 30, x + w, y + h - 26, (52, 110, 60))
+    # rolling green hill (soft curved crest, no flat slab)
+    base = y + h
+    crest = y + h - 30
+    top = []
+    for i in range(25):
+        tx = x + i * w / 24
+        ty = crest - 6 * math.sin(i / 24 * math.pi * 2.0)
+        top.append((tx, ty))
+    poly(top + [(x + w, base), (x, base)], (52, 110, 60))
+    top2 = [(tx, ty - 5) for (tx, ty) in top]
+    poly(top2 + [(x + w, base - 5), (x, base - 5)], (74, 140, 78))
     # plane (top right, side view silhouette)
     px, py = x + w - 150, y + 26
     poly([(px, py + 10), (px + 118, py + 4), (px + 132, py + 8),
@@ -337,10 +449,12 @@ def draw_summit(x, y, w, h):
     fx = x + 14
     fy = y + h - 30 - fh - 46
     for kind in ('us', 'ph', 'jp', 'au'):
-        # pole
-        fill_rect(fx + fw // 2 - 2, fy - 8, fx + fw // 2 + 2, y + h - 30,
+        # pole (planted deep so it never floats above the rolling hill)
+        fill_rect(fx + fw // 2 - 2, fy - 8, fx + fw // 2 + 2, y + h - 16,
                   (60, 60, 60))
         fill_circle(fx + fw // 2, fy - 8, 4, (212, 175, 55))
+        # rounded flag corners (nested clip; restored afterwards)
+        prev = push_clip(fx, fy, fx + fw, fy + fh, 3)
         if kind == 'us':
             for s in range(7):
                 fill_rect(fx, fy + s * 6, fx + fw, fy + (s + 1) * 6,
@@ -366,6 +480,7 @@ def draw_summit(x, y, w, h):
             fill_circle(fx + 50, fy + 34, 2, WHITE)
             line(fx + 6, fy + 8, fx + 22, fy + 8, WHITE, 2)
             line(fx + 14, fy + 2, fx + 14, fy + 14, WHITE, 2)
+        pop_clip(prev)
         fx += fw + gap
 
 
@@ -376,18 +491,18 @@ def draw_bridge(x, y, w, h):
     fill_circle(x + 90, y + 26, 17, (104, 110, 122))
     fill_circle(x + 150, y + 18, 13, (112, 118, 130))
     fill_circle(x + 350, y + 30, 15, (104, 110, 122))
-    # water
+    # water (deep gradient, not a flat slab)
     wy = y + h - 52
-    fill_rect(x, wy, x + w, y + h, (24, 52, 88))
+    vgrad(x, wy, x + w, y + h, (28, 60, 100), (18, 40, 72))
     for i in range(6):
         line(x + 20 + i * 74, wy + 12 + (i % 2) * 14,
              x + 66 + i * 74, wy + 12 + (i % 2) * 14, (120, 170, 210), 2)
     # bridge deck + towers
     dy = wy - 34
-    fill_rect(x + 8, dy, x + w - 8, dy + 8, (28, 28, 30))
+    round_rect(x + 8, dy, x + w - 8, dy + 8, 4, (28, 28, 30))
     for tx in (x + 96, x + w - 112):
-        fill_rect(tx, dy - 66, tx + 14, dy, (40, 40, 44))
-        fill_rect(tx - 6, dy - 66, tx + 20, dy - 60, (40, 40, 44))
+        round_rect(tx, dy - 66, tx + 14, dy, 3, (40, 40, 44))
+        round_rect(tx - 6, dy - 66, tx + 20, dy - 60, 3, (40, 40, 44))
         line(tx + 7, dy - 62, x + 14, dy, (200, 200, 200), 2)
         line(tx + 7, dy - 62, x + w - 14, dy, (200, 200, 200), 2)
         line(tx + 7, dy - 62, tx + 7, dy, (200, 200, 200), 2)
@@ -426,13 +541,13 @@ def draw_drones(x, y, w, h):
                    (330, 44), (390, 26), (60, 62), (250, 58), (180, 52),
                    (420, 60), (120, 74)):
         fill_circle(x + sx, y + sy, 2, WHITE)
-    # sea
+    # sea (gradient, not a flat slab)
     sy = y + h - 44
-    fill_rect(x, sy, x + w, y + h, (8, 42, 66))
+    vgrad(x, sy, x + w, y + h, (10, 48, 76), (6, 30, 52))
     line(x + 16, sy + 12, x + 120, sy + 12, (70, 130, 170), 2)
     line(x + 220, sy + 26, x + 330, sy + 26, (70, 130, 170), 2)
-    # land strip + radar pedestal
-    fill_rect(x + 30, sy - 6, x + 170, sy, (52, 58, 66))
+    # land strip + radar pedestal (rounded top edge)
+    round_rect(x + 30, sy - 6, x + 170, sy, 4, (52, 58, 66))
     bx, by = x + 100, sy - 6
     fill_rect(bx - 8, by - 34, bx + 8, by, (120, 124, 130))
     # radar dish (parabola bowl)
@@ -458,7 +573,8 @@ def draw_drones(x, y, w, h):
     # radar screen (top-right)
     rx, ry, rr = x + w - 62, y + 46, 34
     fill_circle(rx, ry, rr, (6, 40, 18))
-    frame(rx - rr, ry - rr, rx + rr + 1, ry + rr + 1, (60, 200, 110), 2)
+    round_frame(rx - rr, ry - rr, rx + rr + 1, ry + rr + 1, 8,
+                (60, 200, 110), 2)
     line(rx, ry, rx + 24, ry - 20, (90, 255, 140), 2)
     fill_circle(rx - 12, ry + 10, 3, (140, 255, 170))
     fill_circle(rx + 10, ry + 14, 2, (140, 255, 170))
@@ -472,9 +588,9 @@ def draw_cyclone(x, y, w, h):
         rx = x + 18 + i * 31
         line(rx, y + 12 + (i % 3) * 8, rx - 10, y + 34 + (i % 3) * 8,
              (190, 210, 230), 2)
-    # sea
+    # sea (gradient, not a flat slab)
     sy = y + h - 46
-    fill_rect(x, sy, x + w, y + h, (22, 62, 110))
+    vgrad(x, sy, x + w, y + h, (26, 70, 120), (16, 48, 92))
     for i in range(5):
         arc(x + 40 + i * 84, sy + 14 + (i % 2) * 12, 18, math.pi, 2 * math.pi,
             (200, 225, 245), 2)
@@ -503,8 +619,8 @@ def draw_cyclone(x, y, w, h):
         poly([(tx, sy + 2), (tx + 9, sy + 18), (tx - 9, sy + 18)],
              (200, 30, 30))
         draw_text(tx - 2, sy + 8, 1, WHITE, '!')
-    # HIGH ALERT strip
-    fill_rect(x, y + h - 24, x + w, y + h, (179, 32, 44))
+    # HIGH ALERT pill (rounded, inset -- no flat full-width strip)
+    round_rect(x + 18, y + h - 24, x + w - 18, y + h - 2, 11, (179, 32, 44))
     center_text(x + w // 2, y + h - 19, 2, WHITE, 'HIGH ALERT')
 
 
@@ -528,11 +644,20 @@ STORIES = [
 def draw_panel(px, py, story):
     kicker, h1, h2, s1, s2, draw = story
     pw, ph = 480, 388
-    fill_rect(px, py, px + pw, py + ph, WHITE)
-    frame(px, py, px + pw, py + ph, INK, 3)
+    # soft drop shadow, then rounded white body + rounded border
+    round_rect(px + 5, py + 6, px + pw + 5, py + ph + 6, 26,
+               (206, 199, 183))
+    round_rect(px, py, px + pw, py + ph, 26, WHITE)
+    round_frame(px, py, px + pw, py + ph, 26, INK, 3)
     draw_text(px + 16, py + 12, 3, RED, kicker)
-    draw(px + 16, py + 38, 448, 210, )
-    fill_rect(px + 16, py + 256, px + pw - 16, py + 258, (200, 200, 200))
+    # illustration in a rounded-corner region (r=14) with a soft outline
+    ix, iy, iw, ih = px + 16, py + 38, 448, 210
+    set_clip(ix, iy, ix + iw, iy + ih, 14)
+    draw(ix, iy, iw, ih)
+    clear_clip()
+    round_frame(ix, iy, ix + iw, iy + ih, 14, (190, 190, 190), 2)
+    round_rect(px + 16, py + 255, px + pw - 16, py + 259, 2,
+               (200, 200, 200))
     draw_text(px + 16, py + 268, 4, INK, h1)
     draw_text(px + 16, py + 302, 4, INK, h2)
     draw_text(px + 16, py + 342, 2, GRAY, s1)
@@ -540,10 +665,11 @@ def draw_panel(px, py, story):
 
 
 def build():
-    fill_rect(0, 0, W, H, PAPER)
+    # page: gentle vertical gradient (soft depth, not a flat plate)
+    vgrad(0, 0, W, H, (248, 244, 233), (240, 233, 219))
     # masthead
     center_text(W // 2, 26, 9, INK, "WORLD NEWS")
-    fill_rect(60, 100, W - 60, 106, RED)
+    round_rect(60, 100, W - 60, 106, 3, RED)
     center_text(W // 2, 114, 4, INK, "WEDNESDAY, 18 NOVEMBER 2026")
     center_text(W // 2, 148, 2, GRAY, "FOUR STORIES THAT SHAPED THE DAY")
     # panels
@@ -551,11 +677,11 @@ def build():
     for (px, py), story in zip(positions, STORIES):
         draw_panel(px, py, story)
     # footer
-    fill_rect(60, 992, W - 60, 994, (180, 175, 160))
+    round_rect(60, 992, W - 60, 994, 1, (180, 175, 160))
     center_text(W // 2, 1000, 2, GRAY,
                 "18 NOVEMBER 2026 - THE WORLD IN ONE PAGE")
-    # thin outer frame
-    frame(8, 8, W - 8, H - 8, INK, 2)
+    # rounded outer frame
+    round_frame(8, 8, W - 8, H - 8, 18, INK, 2)
 
 
 # ---------------------------------------------------------------- PNG encode

@@ -2,7 +2,7 @@
 
 [![make.fun · news-image-20261118](https://make.fun/badge/news-image-20261118.svg)](https://make.fun/bounty/news-image-20261118)
 
-A one-page newspaper summing up the world's news of Wednesday 18 November 2026 — drawn entirely in code, Python standard library only. Text is a smooth single-stroke vector font and the whole page is rendered at 3x and downsampled, so edges are anti-aliased instead of blocky.
+A one-page newspaper summing up the world's news of Wednesday 18 November 2026 — drawn entirely in code, Python standard library only. Text is a smooth single-stroke vector font and the whole page is rendered at 3x and downsampled, so edges are anti-aliased instead of blocky. Panels, frames and illustration regions are large-radius rounded rectangles with soft drop shadows and gradients — nothing flat and square.
 
 ## The four stories
 
